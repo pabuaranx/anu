@@ -46,7 +46,7 @@ jobs:
           # Contoh: PREFIX_BARU = "● LIVE - "
           # Contoh: PREFIX_BARU = "[SIARAN LANGSUNG] "
           # Kalau mau HAPUS TOTAL prefixnya (jadi cuma "RCTI" aja), isi kosong:
-          PREFIX_BARU = "🟢 Live "  # <-- GANTI DI SINI
+          PREFIX_BARU = "[🟢 LIVE ] "  # <-- GANTI DI SINI
 
           # Ini daftar prefix lama yang mau dibersihin / diganti
           # Kalau di sumber ada variasi lain, tambahin aja di sini
