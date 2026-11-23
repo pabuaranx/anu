@@ -1,3 +1,5 @@
+name: Update Playlist RBTV
+
 on:
   schedule:
     - cron: '0 */6 * * *'
@@ -13,44 +15,97 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Download Pl
+      - name: Setup Python + Playwright
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: |
+          pip install playwright
+          playwright install chromium --with-deps
+
+      - name: Download Pl (Tembus Cloudflare Pakai Browser)
         run: |
           mkdir -p px
-          curl -L -A "Mozilla/5.0" -o px/ram2 "https://iptv.amritv.my.id/script/rbtv/getplaylist.php"
-          
+          python3 << 'PY'
+          from playwright.sync_api import sync_playwright
+          import time
+
+          URL = "https://iptv.amritv.my.id/script/rbtv/getplaylist.php"
+          OUT = "px/ram2"
+
+          with sync_playwright() as p:
+              browser = p.chromium.launch(headless=True, args=['--no-sandbox'])
+              context = browser.new_context(
+                  user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                  viewport={"width": 1280, "height": 720}
+              )
+              page = context.new_page()
+              print(f"Buka {URL}...")
+              try:
+                  page.goto(URL, timeout=60000)
+              except Exception as e:
+                  print(f"Goto error (wajar kalau CF): {e}")
+
+              # Tunggu Cloudflare kelar, max 60 detik
+              for i in range(12):
+                  time.sleep(5)
+                  title = page.title()
+                  content = page.content()
+                  print(f"Cek ke-{i+1}: Title={title} Panjang={len(content)}")
+                  if "Just a moment" not in title and "Just a moment" not in content[:2000]:
+                      break
+                  if i == 5:
+                      print("Masih CF, reload...")
+                      try:
+                          page.reload(timeout=60000)
+                      except: pass
+
+              text = page.inner_text("body")
+              if not text or len(text) < 100:
+                  text = page.evaluate("() => document.body.innerText || document.documentElement.innerText || ''")
+
+              print(f"Panjang didapat: {len(text)}")
+              print("5 baris pertama:")
+              print("\n".join(text.splitlines()[:5]))
+
+              if "#EXTM3U" not in text[:1000]:
+                  print("GAGAL: Bukan playlist, masih kena CF")
+                  open("px/debug.html", "w", encoding="utf-8").write(page.content())
+                  raise SystemExit(1)
+
+              open(OUT, "w", encoding="utf-8").write(text)
+              print(f"Berhasil disimpan ke {OUT}")
+              browser.close()
+          PY
+
           if ! head -n 1 px/ram2 | grep -q "#EXTM3U"; then
             echo "Gagal! File bukan playlist"
             cat px/ram2
             exit 1
           fi
+          echo "Download OK, $(wc -l < px/ram2) baris"
 
       - name: Filter Live + Edit Nama + Logo + Tambah Donasi di Awal
         run: |
           python3 << 'PY'
-          import re
+          import re, shutil
 
           # ==========================================
           # >>> SETTING DI SINI AJA <<<
           # ==========================================
-
           NAMA_KATEGORI = "LIVE NOW"
           PREFIX_BARU = "[ 🟢 LIVE ] "
           PREFIX_LAMA_LIST = [
               "🔴 [Live] ", "🔴 [LIVE] ", "🔴 [Live]", "🔴[Live] ",
               "[Live] ", "[LIVE] ", "🔴 LIVE ", "🔴 Live ", "🔴 ", "● LIVE ",
+              "[ 🟢 LIVE ] ", "[🟢 LIVE] ",
           ]
-
           LOGO_DEFAULT = "https://defira.my.id/sett/ev.jpeg"
           LOGO_PER_CHANNEL = {
               # "RCTI": "https://contoh.com/rcti.png",
           }
-
-          # --- SIARAN PERTAMA (PALING ATAS) ---
-          # Kalau mau ganti siaran pertama, ganti di sini aja
-          # Formatnya harus 2 baris: baris #EXTINF dan baris link-nya
           SIARAN_PERTAMA_EXTINF = '#EXTINF:-1 tvg-id="" tvg-name="Donasi ++" tvg-logo="https://static.vecteezy.com/system/resources/previews/054/224/335/non_2x/charity-icon-colored-outline-icon-style-hand-giving-money-icon-related-to-donation-and-charity-donation-elements-illustration-vector.jpg" group-title="INDONESIA",Donasi ++'
           SIARAN_PERTAMA_URL = 'https://github.com/rohmanabdu/cloudd/raw/refs/heads/main/awal.mp4'
-
           # ==========================================
           # >>> SAMPAI SINI AJA <<<
           # ==========================================
@@ -62,12 +117,11 @@ jobs:
               lines = f.readlines()
 
           header = lines[0] if lines and lines[0].startswith('#EXTM3U') else '#EXTM3U\n'
-          
-          # Kita siapkan list baru, langsung isi siaran pertama di awal
+          # FIX: Kalau header asli ada atribut x-tvg-url dll, pertahankan. Kalau cuma #EXTM3U doang, pakai itu.
+          if not header.endswith('\n'):
+              header += '\n'
+
           new_lines = [header]
-          
-          # --- MASUKIN SIARAN PERTAMA ---
-          # Cek dulu biar ga double kalau di playlist asli sudah ada Donasi
           new_lines.append(SIARAN_PERTAMA_EXTINF + '\n')
           new_lines.append(SIARAN_PERTAMA_URL + '\n')
 
@@ -76,18 +130,35 @@ jobs:
           while i < len(lines):
               line = lines[i].strip()
               if line.startswith('#EXTINF'):
-                  url_lines = []
+                  # FIX: Ambil semua baris tambahan sampai ketemu URL (http)
+                  # Yang lama salah, dia berhenti di baris kosong padahal URL masih di bawahnya
+                  extra_lines = []
                   j = i + 1
+                  url = ""
                   while j < len(lines):
-                      next_line = lines[j].strip()
-                      if next_line == "" or next_line.startswith('#EXTVLCOPT'):
-                          url_lines.append(lines[j]); j += 1; continue
-                      break
-                  url = lines[j].strip() if j < len(lines) else ""
-                  low = line.lower()
+                      nxt = lines[j].strip()
+                      if nxt.startswith('#EXTVLCOPT') or nxt.startswith('#EXTGRP'):
+                          extra_lines.append(lines[j])
+                          j += 1
+                          continue
+                      if nxt == "":
+                          j += 1
+                          continue
+                      if nxt.startswith('http'):
+                          url = nxt
+                          j += 1
+                          break
+                      # Kalau ketemu #EXTINF lagi, berarti channel ini gak ada URL-nya, skip
+                      if nxt.startswith('#EXTINF'):
+                          break
+                      # Baris lain yang bukan URL, anggap extra
+                      extra_lines.append(lines[j])
+                      j += 1
 
+                  low = line.lower()
                   if 'upcoming' in low or 'up coming' in low or 'coming soon' in low:
-                      i = j + 1; continue
+                      i = j
+                      continue
 
                   if ',' in line:
                       atribut, nama_channel = line.rsplit(',', 1)
@@ -95,18 +166,21 @@ jobs:
                       atribut, nama_channel = line, ""
                   nama_channel = nama_channel.strip()
 
-                  # Skip kalau di playlist asli sudah ada Donasi, biar ga double
                   if 'donasi' in nama_channel.lower():
-                      i = j + 1; continue
+                      i = j
+                      continue
 
-                  # Bersihin prefix lama
-                  nama_bersih = nama_channel
-                  for p in PREFIX_LAMA_LIST:
-                      if nama_bersih.startswith(p):
-                          nama_bersih = nama_bersih[len(p):].strip(); break
-                      if nama_bersih.lstrip().startswith(p.strip()):
-                          nama_bersih = nama_bersih.lstrip()[len(p.strip()):].strip(); break
-                  
+                  # FIX: Bersihin prefix lama sampai bersih total, bukan cuma 1x
+                  nama_bersih = nama_channel.strip()
+                  berubah = True
+                  while berubah:
+                      berubah = False
+                      for p in PREFIX_LAMA_LIST:
+                          if nama_bersih.startswith(p):
+                              nama_bersih = nama_bersih[len(p):].strip()
+                              berubah = True
+                              break
+
                   nama_final = f"{PREFIX_BARU}{nama_bersih}" if PREFIX_BARU else nama_bersih
 
                   if 'group-title=' in atribut:
@@ -117,26 +191,25 @@ jobs:
                   logo_mau_dipakai = LOGO_PER_CHANNEL.get(nama_bersih, LOGO_PER_CHANNEL.get(nama_final, ""))
                   if not logo_mau_dipakai:
                       logo_mau_dipakai = LOGO_DEFAULT
-
                   if logo_mau_dipakai:
                       if 'tvg-logo=' in atribut:
                           atribut = re.sub(r'tvg-logo="[^"]*"', f'tvg-logo="{logo_mau_dipakai}"', atribut)
                       else:
                           atribut = atribut.replace('#EXTINF:-1', f'#EXTINF:-1 tvg-logo="{logo_mau_dipakai}"', 1)
 
-                  line_baru = f"{atribut},{nama_final}"
-                  new_lines.append(line_baru + '\n')
-                  for ul in url_lines:
+                  new_lines.append(f"{atribut},{nama_final}\n")
+                  for ul in extra_lines:
                       new_lines.append(ul)
                   if url:
-                      new_lines.append(url + '\n'); kept += 1
-                  i = j + 1
+                      new_lines.append(url + '\n')
+                      kept += 1
+                  i = j
               else:
                   i += 1
 
           with open(output_file, 'w', encoding='utf-8') as f:
               f.writelines(new_lines)
-          import shutil; shutil.move(output_file, input_file)
+          shutil.move(output_file, input_file)
           print(f"Kept (Live): {kept} + 1 Donasi di awal")
           PY
 
